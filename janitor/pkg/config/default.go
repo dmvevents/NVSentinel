@@ -194,6 +194,7 @@ func getDefaultGPUResetJobTemplate(namespace string, image string, secrets []Ima
 							},
 						},
 					},
+					RuntimeClassName: ptr.To("nvidia"),
 					RestartPolicy:    corev1.RestartPolicyOnFailure,
 					HostNetwork:      true,
 					ImagePullSecrets: imagePullSecrets,
