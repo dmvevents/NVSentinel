@@ -1,0 +1,28 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "system-services-monitor.fullname" . }}
+  labels:
+    {{- include "system-services-monitor.labels" . | nindent 4 }}
+data:
+  CHECK_INTERVAL: {{ .Values.checkInterval | quote }}
+  METRICS_PORT: {{ .Values.metricsPort | quote }}
+  BOOT_GRACE_PERIOD: {{ .Values.bootGracePeriod | quote }}
+  FLAP_WINDOW: {{ .Values.flapWindow | quote }}
+  FLAP_THRESHOLD: {{ .Values.flapThreshold | quote }}
+  ENABLE_FABRIC_CHECK: {{ .Values.enableFabricCheck | quote }}
+  ENABLE_CUDA_VALIDATION: {{ .Values.enableCudaValidation | quote }}
+  LOG_LEVEL: {{ .Values.logLevel | quote }}

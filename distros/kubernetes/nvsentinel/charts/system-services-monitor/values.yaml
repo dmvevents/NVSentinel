@@ -1,0 +1,80 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+image:
+  repository: ghcr.io/nvidia/nvsentinel/system-services-monitor
+  pullPolicy: IfNotPresent
+  tag: ""
+
+podAnnotations: {}
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+# Metrics port exposed by the monitor's HTTP endpoint.
+metricsPort: 9101
+
+# Polling interval (seconds) between service health checks.
+checkInterval: "30"
+
+# Boot grace period (seconds) — services flapping during this window
+# after node boot are not reported as failed.
+bootGracePeriod: "300"
+
+# Flap detection window (seconds) over which flapThreshold restarts are counted.
+flapWindow: "600"
+
+# Restart-count threshold within flapWindow that triggers a flapping alert.
+flapThreshold: "3"
+
+# Per-check toggles. Disable individual probes when the host does not
+# host the corresponding NVIDIA component (e.g. CUDA validation requires
+# /usr/local/cuda + nvidia-smi).
+enableFabricCheck: true
+enableCudaValidation: false
+
+# ServiceMonitor (Prometheus Operator) for auto-discovery.
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  # Label required by the cluster's Prometheus operator selector.
+  # Most operator installs use `release: prometheus`; override here if not.
+  labels:
+    release: prometheus
+
+# PrometheusRule with FabricManager / GPU service / CUDA alert definitions.
+prometheusRule:
+  enabled: true
+  labels:
+    release: prometheus
+
+# Scheduling. Default selector targets nodes that expose NVIDIA PCI devices
+# (label set by the GPU Feature Discovery operator).
+nodeSelector:
+  feature.node.kubernetes.io/pci-10de.present: "true"
+
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+affinity: {}
+
+logLevel: INFO
