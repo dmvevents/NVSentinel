@@ -28,14 +28,12 @@ NODE = "test-node"
 
 
 def _make_watcher(boot_grace_period: int = 0):
-    """Build a watcher with ServiceChecker and FabricStateChecker mocked out.
+    """Build a watcher with ServiceChecker mocked out.
 
     boot_grace_period defaults to 0 so _in_grace_period() is False and
     unhealthy results are emitted (the grace window is exercised separately).
     """
-    with patch("system_services_monitor.checkers.watcher.ServiceChecker") as mock_svc_cls, patch(
-        "system_services_monitor.checkers.watcher.FabricStateChecker"
-    ) as mock_fabric_cls:
+    with patch("system_services_monitor.checkers.watcher.ServiceChecker") as mock_svc_cls:
         watcher = FabricManagerWatcher(
             poll_interval=1,
             callbacks=[],
@@ -43,9 +41,8 @@ def _make_watcher(boot_grace_period: int = 0):
             boot_grace_period=boot_grace_period,
             enable_fabric_check=True,
         )
-    # Expose the mocked checker instances for per-test configuration.
+    # Expose the mocked checker instance for per-test configuration.
     watcher._service_checker = watcher._service_checker
-    watcher._fabric_state_checker = watcher._fabric_state_checker
     return watcher
 
 
@@ -56,7 +53,6 @@ def _fm_status(active: bool = True, n_restarts: int = 0, flapping: bool = False)
         sub_state="running" if active else "dead",
         main_pid=1234 if active else 0,
         n_restarts=n_restarts,
-        journal_errors=[],
         flapping=flapping,
     )
 
@@ -176,34 +172,6 @@ class TestRunServiceChecks:
         assert "GPU_SERVICE_NOT_RUNNING" in svc_results[0].error_codes
 
 
-class TestRunFabricStateChecks:
-    def test_fabric_unhealthy_suppressed_during_grace(self) -> None:
-        """During the boot grace period unhealthy fabric results are dropped, healthy kept."""
-        w = _make_watcher(boot_grace_period=3600)
-        unhealthy = CheckResult(
-            check_name="FabricStateUnhealthy",
-            is_healthy=False,
-            is_fatal=True,
-            error_codes=["FM_REGISTRATION_STUCK"],
-            message="stuck",
-            entities_impacted=[{"entityType": "GPU", "entityValue": "0"}],
-        )
-        healthy = CheckResult(
-            check_name="FabricStateUnhealthy",
-            is_healthy=True,
-            is_fatal=False,
-            error_codes=[],
-            message="ok",
-            entities_impacted=[{"entityType": "GPU", "entityValue": "1"}],
-        )
-        w._fabric_state_checker.check.return_value = []
-        w._fabric_state_checker.to_check_results.return_value = [unhealthy, healthy]
-
-        results = w._run_fabric_state_checks()
-
-        assert results == [healthy]
-
-
 class TestFireCallbacks:
     def test_dispatch_delivers_results_and_records_success(self) -> None:
         """_fire_callback_funcs runs each callback with the results (happy path)."""
@@ -248,17 +216,15 @@ class TestStartLoop:
         exit_event = Event()
 
         w._service_checker.check_fabric_manager.return_value = _fm_status(active=True)
-        w._service_checker.check_all_gpu_services.return_value = {}
-        w._fabric_state_checker.check.return_value = []
         # Signal exit from inside the cycle so the loop body executes exactly
         # once, then falls through exit.wait() and terminates.
-        w._fabric_state_checker.to_check_results.side_effect = lambda *a, **k: (exit_event.set() or [])
+        w._service_checker.check_all_gpu_services.side_effect = lambda *a, **k: (exit_event.set() or {})
 
         w.start(exit_event)
 
         # One cycle's worth of checks ran and the loop returned cleanly.
         assert w._service_checker.check_fabric_manager.call_count == 1
-        assert w._fabric_state_checker.check.call_count == 1
+        assert w._service_checker.check_all_gpu_services.call_count == 1
         assert exit_event.is_set()
 
     def test_disabled_fabric_check_registers_no_checkers(self) -> None:

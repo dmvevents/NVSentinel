@@ -19,10 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from system_services_monitor.checkers.service_check import (
-    ErrorCategory,
-    ServiceChecker,
-)
+from system_services_monitor.checkers.service_check import ServiceChecker
 
 
 def _completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess:
@@ -132,25 +129,3 @@ class TestFlapDetection:
         assert c.is_flapping("svc") is True
 
 
-class TestParseJournalErrors:
-    def test_recognizes_known_error_patterns(self, checker: ServiceChecker) -> None:
-        """Journal text matching pattern lists is classified into categories."""
-        journal_text = (
-            "fabricmanager: NVSwitch initialization failed\n" "fabricmanager: timed out waiting for response\n"
-        )
-        with patch.object(ServiceChecker, "_run_host_cmd", return_value=_completed(stdout=journal_text)):
-            cats = checker._parse_journal_errors("nvidia-fabricmanager")
-
-        # NVSWITCH_ERROR ("nvswitch"), INITIALIZATION_FAILED ("initialization failed"),
-        # TIMEOUT ("timed out"), GENERAL_ERROR ("error"/"failed") all match.
-        assert ErrorCategory.NVSWITCH_ERROR in cats
-        assert ErrorCategory.INITIALIZATION_FAILED in cats
-        assert ErrorCategory.TIMEOUT in cats
-        assert ErrorCategory.GENERAL_ERROR in cats
-
-    def test_empty_journal_returns_no_categories(self, checker: ServiceChecker) -> None:
-        """A clean journal yields an empty category list."""
-        with patch.object(ServiceChecker, "_run_host_cmd", return_value=_completed(stdout="")):
-            cats = checker._parse_journal_errors("nvidia-fabricmanager")
-
-        assert cats == []

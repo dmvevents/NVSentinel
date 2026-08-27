@@ -15,55 +15,20 @@
 """Systemd service health checks for Fabric Manager and GPU services.
 
 Uses nsenter to inspect host systemd services from within a container.
-Includes flap detection (rapid restart cycling) and journal error parsing.
-NRestarts is queried in a separate systemctl call for compatibility with
-older systemd versions that do not support it in a combined --property list.
+Includes flap detection (rapid restart cycling). NRestarts is queried in a
+separate systemctl call for compatibility with older systemd versions that
+do not support it in a combined --property list.
+
+Journal-pattern detection deliberately does NOT live here (per ADR-050):
+journald parsing is owned by syslog-health-monitor.
 """
 
 import logging as log
 import subprocess
 import time
 from collections import deque
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import dataclass
 from typing import Dict, List, Optional
-
-from .types import CheckResult
-
-
-class ErrorCategory(Enum):
-    """Failure-mode categories parsed from Fabric Manager journal lines."""
-
-    NVSWITCH_ERROR = "nvswitch_error"
-    INITIALIZATION_FAILED = "initialization_failed"
-    TIMEOUT = "timeout"
-    GENERAL_ERROR = "general_error"
-
-
-# Journal patterns that indicate specific failure modes
-_ERROR_PATTERNS = {
-    ErrorCategory.NVSWITCH_ERROR: [
-        "nvswitch",
-        "NVSwitch",
-        "fabric error",
-    ],
-    ErrorCategory.INITIALIZATION_FAILED: [
-        "initialization failed",
-        "failed to initialize",
-        "Init Failed",
-        "unable to start",
-    ],
-    ErrorCategory.TIMEOUT: [
-        "timed out",
-        "timeout",
-        "deadline exceeded",
-    ],
-    ErrorCategory.GENERAL_ERROR: [
-        "error",
-        "fatal",
-        "failed",
-    ],
-}
 
 
 @dataclass
@@ -82,9 +47,8 @@ class ServiceStatus:
 
 @dataclass
 class FabricManagerStatus(ServiceStatus):
-    """Extended status for Fabric Manager with journal analysis."""
+    """Extended status for Fabric Manager with flap detection."""
 
-    journal_errors: List[ErrorCategory] = field(default_factory=list)
     flapping: bool = False
 
 
@@ -260,10 +224,9 @@ class ServiceChecker:
         return len(history) >= self._flap_threshold
 
     def check_fabric_manager(self) -> FabricManagerStatus:
-        """Check Fabric Manager with journal error analysis."""
+        """Check Fabric Manager with flap detection."""
         base = self.check_service("nvidia-fabricmanager")
 
-        journal_errors = self._parse_journal_errors("nvidia-fabricmanager")
         flapping = self.is_flapping("nvidia-fabricmanager")
 
         return FabricManagerStatus(
@@ -275,40 +238,8 @@ class ServiceChecker:
             n_restarts=base.n_restarts,
             start_timestamp=base.start_timestamp,
             error=base.error,
-            journal_errors=journal_errors,
             flapping=flapping,
         )
-
-    def _parse_journal_errors(self, service_name: str) -> List[ErrorCategory]:
-        """Scan recent journal entries for known error patterns."""
-        try:
-            result = self._run_host_cmd(
-                [
-                    "journalctl",
-                    "-u",
-                    service_name,
-                    "--since",
-                    "5 minutes ago",
-                    "--no-pager",
-                    "-q",
-                ],
-                timeout=15,
-            )
-
-            if result.returncode != 0 or not result.stdout.strip():
-                return []
-
-            found: List[ErrorCategory] = []
-            text = result.stdout.lower()
-            for category, patterns in _ERROR_PATTERNS.items():
-                if any(p.lower() in text for p in patterns):
-                    found.append(category)
-
-            return found
-
-        except (subprocess.TimeoutExpired, Exception) as e:
-            log.warning(f"Journal parsing failed for {service_name}: {e}")
-            return []
 
     def check_all_gpu_services(self, service_names: Optional[List[str]] = None) -> Dict[str, ServiceStatus]:
         """Check all configured GPU services."""

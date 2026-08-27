@@ -76,13 +76,6 @@ nvidia_service_up = Gauge(
     labelnames=["node", "service_name"],
 )
 
-# --- Per-GPU fabric state ---
-fabric_state_healthy = Gauge(
-    "fabric_state_healthy",
-    "Per-GPU fabric orchestration state (1=completed, 0=unhealthy)",
-    labelnames=["node", "gpu_index"],
-)
-
 # --- Overall node health ---
 gpu_node_health_up = Gauge(
     "gpu_node_health_up",

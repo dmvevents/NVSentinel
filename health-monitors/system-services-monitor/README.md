@@ -1,6 +1,6 @@
 # System Services Monitor
 
-Health monitor for non-DCGM infrastructure failures on NVIDIA GPU nodes: Fabric Manager service health, per-GPU fabric state, and GPU service lifecycle.
+Health monitor for the systemd unit layer on NVIDIA GPU nodes: Fabric Manager service health with flap detection, and GPU service lifecycle. Per-GPU fabric probe state is owned by gpu-health-monitor (DCGM 4.5.2 health watches); journal-pattern detection is owned by syslog-health-monitor (per ADR-050).
 
 Documentation has been moved to the repo-wide `docs/` tree per project convention:
 

@@ -18,10 +18,11 @@ Runs non-DCGM health checks on a configurable interval and fires
 callbacks (e.g. PlatformConnectorEventProcessor) with the aggregated
 results. Mirrors the DCGMWatcher pattern from gpu-health-monitor.
 
-Scope (per ADR-050): only checks that DCGM cannot see --
-  FM service health, FM flap detection, fabric state,
-  GPU service lifecycle. PCIe, NVLink, and clock throttling are
-  owned by gpu-health-monitor via pydcgm.
+Scope (per ADR-050): the systemd unit layer only --
+  FM service health, FM flap detection, GPU service lifecycle.
+  PCIe/NVLink/clock throttling and per-GPU fabric probe state are
+  owned by gpu-health-monitor (pydcgm / DCGM 4.5.2 health watches);
+  journal-pattern detection is owned by syslog-health-monitor.
 """
 
 import logging as log
@@ -32,7 +33,6 @@ from threading import Event
 from typing import Callable, List
 
 from system_services_monitor import metrics
-from .fabric_state_check import FabricStateChecker
 from .service_check import ServiceChecker
 from .types import CallbackInterface, CheckResult
 
@@ -84,10 +84,6 @@ class FabricManagerWatcher:
                 flap_threshold=flap_threshold,
             )
             self._checkers.append(("services", self._run_service_checks))
-
-            # Per-GPU fabric state query (depends on FM being monitored)
-            self._fabric_state_checker = FabricStateChecker()
-            self._checkers.append(("fabric_state", self._run_fabric_state_checks))
 
     def _in_grace_period(self) -> bool:
         """True while the node is inside the boot grace period."""
@@ -182,17 +178,10 @@ class FabricManagerWatcher:
             if fm.flapping:
                 log.warning(f"Fabric Manager is flapping on {self._node_name}")
 
-            if fm.journal_errors:
-                log.warning(
-                    f"Fabric Manager journal errors on {self._node_name}: {[e.value for e in fm.journal_errors]}"
-                )
-
             if not fm.active and not self._in_grace_period():
                 error_codes = ["FABRIC_MANAGER_NOT_RUNNING"]
                 if fm.flapping:
                     error_codes.append("FABRIC_MANAGER_FLAPPING")
-                if fm.journal_errors:
-                    error_codes.extend([f"JOURNAL_{e.value.upper()}" for e in fm.journal_errors])
 
                 results.append(
                     CheckResult(
@@ -258,34 +247,3 @@ class FabricManagerWatcher:
                 )
 
         return results
-
-    def _run_fabric_state_checks(self) -> List[CheckResult]:
-        """Query per-GPU fabric state via nvidia-smi."""
-        statuses = self._fabric_state_checker.check()
-
-        # Update per-GPU Prometheus metrics
-        for gpu in statuses:
-            if gpu.fabric_state == "N/A":
-                continue
-            is_healthy = gpu.fabric_state == "Completed" and gpu.fabric_status == "Success"
-            metrics.fabric_state_healthy.labels(self._node_name, str(gpu.gpu_index)).set(1 if is_healthy else 0)
-            if not is_healthy:
-                log.warning(
-                    f"Fabric state unhealthy on {self._node_name} GPU {gpu.gpu_index}: "
-                    f"state={gpu.fabric_state}, status={gpu.fabric_status}"
-                )
-
-        # During boot grace, evaluate without advancing the "In Progress"
-        # streaks: alerts are suppressed then, so FM_REGISTRATION_STUCK must
-        # not accrue toward its threshold either — otherwise a normal slow
-        # startup could trip the alert on the first post-grace poll.
-        in_grace = self._in_grace_period()
-        fabric_results = self._fabric_state_checker.to_check_results(
-            statuses, self._node_name, advance_streak=not in_grace
-        )
-        if in_grace:
-            # Same suppression the service checks apply during node startup:
-            # drop unhealthy results, keep healthy ones (they prime the
-            # transition cache without triggering remediation).
-            fabric_results = [r for r in fabric_results if r.is_healthy]
-        return fabric_results
