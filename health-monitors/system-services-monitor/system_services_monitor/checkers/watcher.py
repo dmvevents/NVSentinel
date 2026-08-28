@@ -275,7 +275,6 @@ class FabricManagerWatcher:
                     metadata={
                         "sub_state": fm.sub_state,
                         "n_restarts": str(fm.n_restarts),
-                        "flapping": str(fm.flapping),
                     },
                 )
             )

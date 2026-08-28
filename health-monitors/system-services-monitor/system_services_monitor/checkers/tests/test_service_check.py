@@ -100,20 +100,37 @@ class TestFlapDetection:
         c._update_flap_tracking("svc", current_restarts=3)
         assert c.is_flapping("svc") is True  # 3 >= threshold(3)
 
-    def test_counter_reset_rebaselines_and_keeps_counting(self) -> None:
-        """systemd resetting NRestarts (reset-failed / reboot) must not silence tracking."""
+    def test_counter_reset_with_restart_rebaselines_and_keeps_counting(self) -> None:
+        """A reset where the process really restarted (start timestamp changed)
+        records one observation, so a reboot-causing crash loop is not silenced."""
         c = ServiceChecker(flap_window=600, flap_threshold=3)
-        c._update_flap_tracking("svc", current_restarts=5)  # baseline
-        c._update_flap_tracking("svc", current_restarts=6)  # 1 event
+        c._update_flap_tracking("svc", current_restarts=5, start_timestamp="t1")  # baseline
+        c._update_flap_tracking("svc", current_restarts=6, start_timestamp="t1")  # 1 event
 
-        # Counter resets to 0 (e.g. reboot). Records one event (the restart
-        # that produced the reset) and re-baselines to 0.
-        c._update_flap_tracking("svc", current_restarts=0)
+        # Counter resets to 0 across a real restart (e.g. reboot): the changed
+        # start timestamp records one event and re-baselines to 0.
+        c._update_flap_tracking("svc", current_restarts=0, start_timestamp="t2")
         assert c._last_restart_count["svc"] == 0
 
         # Counting resumes from the new baseline immediately: one more
         # restart reaches the threshold (1 + 1 reset-event + 1 = 3).
-        c._update_flap_tracking("svc", current_restarts=1)
+        c._update_flap_tracking("svc", current_restarts=1, start_timestamp="t3")
+        assert c.is_flapping("svc") is True
+
+    def test_pure_counter_flush_records_no_restart(self) -> None:
+        """`systemctl reset-failed` on a running service flushes NRestarts without
+        restarting the process — no phantom restart may be recorded."""
+        c = ServiceChecker(flap_window=600, flap_threshold=3)
+        c._update_flap_tracking("svc", current_restarts=5, start_timestamp="t1")  # baseline
+        c._update_flap_tracking("svc", current_restarts=7, start_timestamp="t1")  # 2 events
+
+        # Admin runs reset-failed: counter drops to 0, start timestamp unchanged.
+        c._update_flap_tracking("svc", current_restarts=0, start_timestamp="t1")
+        assert c._last_restart_count["svc"] == 0
+        assert len(c._restart_history["svc"]) == 2  # no phantom third event
+
+        # A reset without any timestamp evidence is also conservative: nothing recorded.
+        c._update_flap_tracking("svc", current_restarts=3, start_timestamp="t1")  # 3 events -> flapping
         assert c.is_flapping("svc") is True
 
     def test_unobserved_probe_leaves_baseline_untouched(self) -> None:

@@ -79,13 +79,24 @@ class PlatformConnectorEventProcessor(CallbackInterface):
         # HealthEvent emissions while send_health_event_with_retries blocks).
         self._cache_lock = threading.Lock()
 
-    def _build_cache_key(self, check_name: str, entities_impacted: List[dict]) -> str:
-        """Build a cache key from check name and impacted entities."""
+    def _build_cache_key(self, result: CheckResult) -> str:
+        """Build a cache key from check name, impacted entities, and instance identity.
+
+        Checks that cover multiple instances per entity (GpuServiceDown probes
+        every configured service against the same NODE entity) must include the
+        instance identity — without it, two services down on one node would
+        collide on a single cache entry and suppress or overwrite each other's
+        transitions (ADR-050, Cached State).
+        """
         entity_str = "|".join(
             f"{e['entityType']}:{e['entityValue']}"
-            for e in sorted(entities_impacted, key=lambda e: (e["entityType"], e["entityValue"]))
+            for e in sorted(result.entities_impacted, key=lambda e: (e["entityType"], e["entityValue"]))
         )
-        return f"{check_name}|{entity_str}"
+        key = f"{result.check_name}|{entity_str}"
+        service_name = (result.metadata or {}).get("service_name")
+        if service_name:
+            key += f"|svc:{service_name}"
+        return key
 
     def _get_recommended_action(self, result: CheckResult) -> int:
         """Map check result to a RecommendedAction enum value.
@@ -121,7 +132,7 @@ class PlatformConnectorEventProcessor(CallbackInterface):
             # send_health_event_with_retries (~26 s worst case).
             with self._cache_lock:
                 for result in results:
-                    cache_key = self._build_cache_key(result.check_name, result.entities_impacted)
+                    cache_key = self._build_cache_key(result)
                     cached = self.entity_cache.get(cache_key)
                     new_state = CachedEntityState(
                         is_fatal=result.is_fatal,

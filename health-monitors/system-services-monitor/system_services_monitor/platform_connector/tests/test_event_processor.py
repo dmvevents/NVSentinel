@@ -59,6 +59,22 @@ class TestRecommendedAction:
     def test_nonfatal_maps_to_contact_support(self, processor: PlatformConnectorEventProcessor) -> None:
         assert processor._get_recommended_action(_result(is_healthy=False, is_fatal=False)) == pb.CONTACT_SUPPORT
 
+    def test_cache_key_discriminates_service_instances(self, processor: PlatformConnectorEventProcessor) -> None:
+        # Two different services down on the same node must not collide on one
+        # cache entry (ADR-050 Cached State: instance identity in the key).
+        a = _result(check_name="GpuServiceDown")
+        a.metadata = {"service_name": "nvidia-persistenced"}
+        b = _result(check_name="GpuServiceDown")
+        b.metadata = {"service_name": "nvidia-imex"}
+        key_a = processor._build_cache_key(a)
+        key_b = processor._build_cache_key(b)
+        assert key_a != key_b
+        assert key_a.endswith("|svc:nvidia-persistenced")
+        assert key_b.endswith("|svc:nvidia-imex")
+        # Single-instance checks keep the plain key shape.
+        fm = _result(check_name="FabricManagerServiceDown")
+        assert "svc:" not in processor._build_cache_key(fm)
+
     def test_not_installed_is_fatal_but_maps_to_contact_support(
         self, processor: PlatformConnectorEventProcessor
     ) -> None:
