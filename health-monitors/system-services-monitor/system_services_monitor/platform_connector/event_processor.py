@@ -96,6 +96,10 @@ class PlatformConnectorEventProcessor(CallbackInterface):
         """
         if result.is_healthy:
             return platformconnector_pb2.NONE
+        if result.check_name == "FabricManagerNotInstalled":
+            # Fatal but not restart-fixable (ADR-050 fm-presence=required):
+            # there is no unit to restart, and a reboot will not install one.
+            return platformconnector_pb2.CONTACT_SUPPORT
         if result.is_fatal:
             return platformconnector_pb2.RESTART_BM
         return platformconnector_pb2.CONTACT_SUPPORT

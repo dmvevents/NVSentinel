@@ -27,7 +27,7 @@ from system_services_monitor.checkers.watcher import FabricManagerWatcher
 NODE = "test-node"
 
 
-def _make_watcher(boot_grace_period: int = 0):
+def _make_watcher(boot_grace_period: int = 0, fm_presence: str = "auto"):
     """Build a watcher with ServiceChecker mocked out.
 
     boot_grace_period defaults to 0 so _in_grace_period() is False and
@@ -40,6 +40,7 @@ def _make_watcher(boot_grace_period: int = 0):
             node_name=NODE,
             boot_grace_period=boot_grace_period,
             enable_fabric_check=True,
+            fm_presence=fm_presence,
         )
     # Expose the mocked checker instance for per-test configuration.
     watcher._service_checker = watcher._service_checker
@@ -83,8 +84,81 @@ class TestRunServiceChecks:
         assert len(fm_results) == 1
         assert fm_results[0].is_healthy is False
         assert fm_results[0].is_fatal is True
-        assert "FABRIC_MANAGER_NOT_RUNNING" in fm_results[0].error_codes
-        assert "FABRIC_MANAGER_FLAPPING" in fm_results[0].error_codes
+        assert fm_results[0].error_codes == ["FABRIC_MANAGER_NOT_RUNNING"]
+        # Flapping is its own check name (ADR-050), not an enrichment code.
+        flap_results = [r for r in results if r.check_name == "FabricManagerFlapping"]
+        assert len(flap_results) == 1
+        assert flap_results[0].is_healthy is False
+        assert flap_results[0].is_fatal is True
+        assert flap_results[0].error_codes == ["FABRIC_MANAGER_FLAPPING"]
+
+    def test_flapping_emits_even_while_unit_reads_active(self) -> None:
+        """A crash-looping unit that reads active at poll time still flags flapping."""
+        w = _make_watcher(boot_grace_period=0)
+        w._service_checker.check_fabric_manager.return_value = _fm_status(active=True, flapping=True)
+        w._service_checker.check_all_gpu_services.return_value = {}
+
+        results = w._run_service_checks()
+
+        down = [r for r in results if r.check_name == "FabricManagerServiceDown"]
+        assert len(down) == 1 and down[0].is_healthy is True
+        flap = [r for r in results if r.check_name == "FabricManagerFlapping"]
+        assert len(flap) == 1
+        assert flap[0].is_healthy is False
+        assert flap[0].is_fatal is True
+
+    def test_not_flapping_emits_healthy_flap_state(self) -> None:
+        """The flapping check primes the transition cache with a healthy state."""
+        w = _make_watcher(boot_grace_period=0)
+        w._service_checker.check_fabric_manager.return_value = _fm_status(active=True, flapping=False)
+        w._service_checker.check_all_gpu_services.return_value = {}
+
+        results = w._run_service_checks()
+
+        flap = [r for r in results if r.check_name == "FabricManagerFlapping"]
+        assert len(flap) == 1
+        assert flap[0].is_healthy is True
+
+    def test_fm_presence_required_flags_missing_unit(self) -> None:
+        """fm-presence=required turns LoadState=not-found into a fatal misconfiguration."""
+        w = _make_watcher(boot_grace_period=0, fm_presence="required")
+        w._service_checker.check_fabric_manager.return_value = FabricManagerStatus(
+            name="nvidia-fabricmanager", active=False, load_state="not-found"
+        )
+        w._service_checker.check_all_gpu_services.return_value = {}
+
+        results = w._run_service_checks()
+
+        missing = [r for r in results if r.check_name == "FabricManagerNotInstalled"]
+        assert len(missing) == 1
+        assert missing[0].is_healthy is False
+        assert missing[0].is_fatal is True
+        assert missing[0].error_codes == ["FABRIC_MANAGER_NOT_INSTALLED"]
+
+    def test_fm_presence_required_clears_once_unit_present(self) -> None:
+        """With fm-presence=required, a present unit emits the healthy transition."""
+        w = _make_watcher(boot_grace_period=0, fm_presence="required")
+        w._service_checker.check_fabric_manager.return_value = _fm_status(active=True)
+        w._service_checker.check_all_gpu_services.return_value = {}
+
+        results = w._run_service_checks()
+
+        missing = [r for r in results if r.check_name == "FabricManagerNotInstalled"]
+        assert len(missing) == 1
+        assert missing[0].is_healthy is True
+
+    def test_fm_presence_disabled_skips_fm_but_keeps_services(self) -> None:
+        """fm-presence=disabled runs no FM check while generic services still run."""
+        w = _make_watcher(boot_grace_period=0, fm_presence="disabled")
+        w._service_checker.check_all_gpu_services.return_value = {
+            "nvidia-persistenced": ServiceStatus(name="nvidia-persistenced", active=True, sub_state="running"),
+        }
+
+        results = w._run_service_checks()
+
+        assert [r for r in results if r.check_name.startswith("FabricManager")] == []
+        assert [r.check_name for r in results] == ["GpuServiceDown"]
+        w._service_checker.check_fabric_manager.assert_not_called()
 
     def test_restart_counter_increments_by_delta(self) -> None:
         """fabric_manager_restarts_total advances by the NRestarts delta across cycles."""

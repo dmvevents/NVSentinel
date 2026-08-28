@@ -127,5 +127,3 @@ class TestFlapDetection:
         # A later real observation still diffs against the old baseline.
         c._update_flap_tracking("svc", current_restarts=7)  # 3 events
         assert c.is_flapping("svc") is True
-
-

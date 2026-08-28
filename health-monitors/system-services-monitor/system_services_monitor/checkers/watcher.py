@@ -57,12 +57,19 @@ class FabricManagerWatcher:
         flap_window: int = 600,
         flap_threshold: int = 3,
         enable_fabric_check: bool = True,
+        fm_presence: str = "auto",
     ) -> None:
         """Wire checkers and callbacks; see class docstring for the polling contract."""
         self._poll_interval = poll_interval
         self._callbacks = callbacks
         self._node_name = node_name
         self._boot_grace_period = boot_grace_period
+        # Platform applicability of the Fabric Manager check (ADR-050):
+        #   auto     -- LoadState=not-found means "not applicable"; skip.
+        #   required -- LoadState=not-found is a misconfiguration; emit a
+        #               fatal FabricManagerNotInstalled.
+        #   disabled -- never check FM (generic services still run).
+        self._fm_presence = fm_presence
         self._start_time = time.monotonic()
         # Single worker on purpose: callbacks apply state transitions, so
         # dispatch must be ordered — with N workers a stale unhealthy result
@@ -149,66 +156,8 @@ class FabricManagerWatcher:
         """Check Fabric Manager and GPU services."""
         results: List[CheckResult] = []
 
-        fm = self._service_checker.check_fabric_manager()
-
-        if fm.load_state == "not-found":
-            # Unit not present on this host (e.g. a platform without
-            # nvidia-fabricmanager installed). Not a failure -- emit nothing
-            # rather than a false FABRIC_MANAGER_NOT_RUNNING.
-            log.debug(f"nvidia-fabricmanager not present on {self._node_name} (LoadState=not-found); skipping")
-        elif fm.error is not None:
-            # The probe itself failed (nsenter/systemctl error or timeout):
-            # FM state is UNKNOWN, which is not the same as FM down. Skip
-            # emission instead of reporting a fatal NOT_RUNNING.
-            log.warning(f"Fabric Manager probe failed on {self._node_name}, state unknown: {fm.error}")
-            metrics.check_errors.labels("services").inc()
-        else:
-            # Update Prometheus metrics
-            metrics.fabric_manager_up.labels(self._node_name).set(1 if fm.active else 0)
-            if fm.active:
-                metrics.fabric_manager_last_healthy_seconds.labels(self._node_name).set(time.time())
-
-            # Increment the restart counter by the delta in systemd NRestarts since
-            # the last cycle. Backs the FabricManagerFlapping alert.
-            restart_delta = fm.n_restarts - self._last_fm_restarts
-            if restart_delta > 0:
-                metrics.fabric_manager_restarts_total.labels(self._node_name).inc(restart_delta)
-            self._last_fm_restarts = fm.n_restarts
-
-            if fm.flapping:
-                log.warning(f"Fabric Manager is flapping on {self._node_name}")
-
-            if not fm.active and not self._in_grace_period():
-                error_codes = ["FABRIC_MANAGER_NOT_RUNNING"]
-                if fm.flapping:
-                    error_codes.append("FABRIC_MANAGER_FLAPPING")
-
-                results.append(
-                    CheckResult(
-                        check_name="FabricManagerServiceDown",
-                        is_healthy=False,
-                        is_fatal=True,
-                        error_codes=error_codes,
-                        message=f"Fabric Manager is {fm.sub_state} on {self._node_name}",
-                        entities_impacted=[{"entityType": "NODE", "entityValue": self._node_name}],
-                        metadata={
-                            "sub_state": fm.sub_state,
-                            "n_restarts": str(fm.n_restarts),
-                            "flapping": str(fm.flapping),
-                        },
-                    )
-                )
-            elif fm.active:
-                results.append(
-                    CheckResult(
-                        check_name="FabricManagerServiceDown",
-                        is_healthy=True,
-                        is_fatal=False,
-                        error_codes=[],
-                        message=f"Fabric Manager is running on {self._node_name}",
-                        entities_impacted=[{"entityType": "NODE", "entityValue": self._node_name}],
-                    )
-                )
+        if self._fm_presence != "disabled":
+            results.extend(self._check_fabric_manager())
 
         # Check additional GPU services
         svc_results = self._service_checker.check_all_gpu_services()
@@ -245,5 +194,138 @@ class FabricManagerWatcher:
                         metadata={"service_name": svc_name},
                     )
                 )
+
+        return results
+
+    def _check_fabric_manager(self) -> List[CheckResult]:
+        """Check the Fabric Manager unit; returns FM-scoped CheckResults."""
+        results: List[CheckResult] = []
+        node_entity = [{"entityType": "NODE", "entityValue": self._node_name}]
+
+        fm = self._service_checker.check_fabric_manager()
+
+        if fm.load_state == "not-found":
+            if self._fm_presence == "required":
+                # The unit is expected on this platform (ADR-050 fm-presence):
+                # its absence is a misconfiguration, not "disabled on purpose".
+                log.error(f"nvidia-fabricmanager unit not found on {self._node_name} but fm-presence=required")
+                if not self._in_grace_period():
+                    results.append(
+                        CheckResult(
+                            check_name="FabricManagerNotInstalled",
+                            is_healthy=False,
+                            is_fatal=True,
+                            error_codes=["FABRIC_MANAGER_NOT_INSTALLED"],
+                            message=(
+                                f"nvidia-fabricmanager unit not found on {self._node_name} " f"(fm-presence=required)"
+                            ),
+                            entities_impacted=node_entity,
+                            metadata={"load_state": "not-found"},
+                        )
+                    )
+            else:
+                # auto: unit not present on this host (e.g. a platform without
+                # nvidia-fabricmanager installed). Not a failure -- emit nothing
+                # rather than a false FABRIC_MANAGER_NOT_RUNNING.
+                log.debug(f"nvidia-fabricmanager not present on {self._node_name} (LoadState=not-found); skipping")
+            return results
+
+        if self._fm_presence == "required":
+            # Clear a prior FabricManagerNotInstalled once the unit exists.
+            results.append(
+                CheckResult(
+                    check_name="FabricManagerNotInstalled",
+                    is_healthy=True,
+                    is_fatal=False,
+                    error_codes=[],
+                    message=f"nvidia-fabricmanager unit present on {self._node_name}",
+                    entities_impacted=node_entity,
+                )
+            )
+
+        if fm.error is not None:
+            # The probe itself failed (nsenter/systemctl error or timeout):
+            # FM state is UNKNOWN, which is not the same as FM down. Skip
+            # emission instead of reporting a fatal NOT_RUNNING.
+            log.warning(f"Fabric Manager probe failed on {self._node_name}, state unknown: {fm.error}")
+            metrics.check_errors.labels("services").inc()
+            return results
+
+        # Update Prometheus metrics
+        metrics.fabric_manager_up.labels(self._node_name).set(1 if fm.active else 0)
+        if fm.active:
+            metrics.fabric_manager_last_healthy_seconds.labels(self._node_name).set(time.time())
+
+        # Increment the restart counter by the delta in systemd NRestarts since
+        # the last cycle. Backs the FabricManagerFlapping alert.
+        restart_delta = fm.n_restarts - self._last_fm_restarts
+        if restart_delta > 0:
+            metrics.fabric_manager_restarts_total.labels(self._node_name).inc(restart_delta)
+        self._last_fm_restarts = fm.n_restarts
+
+        if not fm.active and not self._in_grace_period():
+            results.append(
+                CheckResult(
+                    check_name="FabricManagerServiceDown",
+                    is_healthy=False,
+                    is_fatal=True,
+                    error_codes=["FABRIC_MANAGER_NOT_RUNNING"],
+                    message=f"Fabric Manager is {fm.sub_state} on {self._node_name}",
+                    entities_impacted=node_entity,
+                    metadata={
+                        "sub_state": fm.sub_state,
+                        "n_restarts": str(fm.n_restarts),
+                        "flapping": str(fm.flapping),
+                    },
+                )
+            )
+        elif fm.active:
+            results.append(
+                CheckResult(
+                    check_name="FabricManagerServiceDown",
+                    is_healthy=True,
+                    is_fatal=False,
+                    error_codes=[],
+                    message=f"Fabric Manager is running on {self._node_name}",
+                    entities_impacted=node_entity,
+                )
+            )
+
+        # Flapping is its own check name and transition-state machine
+        # (ADR-050): a crash-looping unit under Restart= reads `active` at
+        # most poll instants, so a flap condition attached to the "down"
+        # check would be masked by whichever instantaneous state the poll
+        # caught. Emit on the restart-window threshold regardless of
+        # ActiveState; recover once the window drains.
+        if fm.flapping:
+            log.warning(f"Fabric Manager is flapping on {self._node_name}")
+            if not self._in_grace_period():
+                results.append(
+                    CheckResult(
+                        check_name="FabricManagerFlapping",
+                        is_healthy=False,
+                        is_fatal=True,
+                        error_codes=["FABRIC_MANAGER_FLAPPING"],
+                        message=(
+                            f"Fabric Manager is crash-looping on {self._node_name} " f"(n_restarts={fm.n_restarts})"
+                        ),
+                        entities_impacted=node_entity,
+                        metadata={
+                            "sub_state": fm.sub_state,
+                            "n_restarts": str(fm.n_restarts),
+                        },
+                    )
+                )
+        else:
+            results.append(
+                CheckResult(
+                    check_name="FabricManagerFlapping",
+                    is_healthy=True,
+                    is_fatal=False,
+                    error_codes=[],
+                    message=f"Fabric Manager restart rate is normal on {self._node_name}",
+                    entities_impacted=node_entity,
+                )
+            )
 
         return results

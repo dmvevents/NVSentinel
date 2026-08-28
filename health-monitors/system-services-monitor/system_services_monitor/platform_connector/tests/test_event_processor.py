@@ -59,6 +59,18 @@ class TestRecommendedAction:
     def test_nonfatal_maps_to_contact_support(self, processor: PlatformConnectorEventProcessor) -> None:
         assert processor._get_recommended_action(_result(is_healthy=False, is_fatal=False)) == pb.CONTACT_SUPPORT
 
+    def test_not_installed_is_fatal_but_maps_to_contact_support(
+        self, processor: PlatformConnectorEventProcessor
+    ) -> None:
+        # ADR-050 fm-presence=required: fatal, but not restart-fixable —
+        # there is no unit to restart and a reboot will not install one.
+        assert (
+            processor._get_recommended_action(
+                _result(check_name="FabricManagerNotInstalled", is_healthy=False, is_fatal=True)
+            )
+            == pb.CONTACT_SUPPORT
+        )
+
 
 class TestHealthCheckCompleted:
     def test_new_state_sends_event_and_updates_cache(self, processor: PlatformConnectorEventProcessor) -> None:

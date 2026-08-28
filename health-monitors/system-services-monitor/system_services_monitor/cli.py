@@ -84,6 +84,18 @@ from system_services_monitor.protos import health_event_pb2 as platformconnector
     help="Enable Fabric Manager service check (env: ENABLE_FABRIC_CHECK)",
 )
 @click.option(
+    "--fm-presence",
+    type=click.Choice(["auto", "required", "disabled"]),
+    default="auto",
+    envvar="FM_PRESENCE",
+    help=(
+        "Fabric Manager platform applicability (env: FM_PRESENCE): auto skips "
+        "when the unit is absent (LoadState=not-found); required treats an "
+        "absent unit as a fatal misconfiguration (FABRIC_MANAGER_NOT_INSTALLED); "
+        "disabled never checks FM"
+    ),
+)
+@click.option(
     "--processing-strategy",
     type=str,
     default="EXECUTE_REMEDIATION",
@@ -99,6 +111,7 @@ def cli(
     flap_window,
     flap_threshold,
     enable_fabric_check,
+    fm_presence,
     processing_strategy,
     verbose,
 ):
@@ -162,6 +175,7 @@ def cli(
         flap_window=flap_window,
         flap_threshold=flap_threshold,
         enable_fabric_check=enable_fabric_check,
+        fm_presence=fm_presence,
     )
 
     watcher.start(stop_event)
